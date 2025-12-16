@@ -459,11 +459,13 @@ def analyze_personality(profile_id):
         logger.error(f"Analyze personality error: {e}")
         return jsonify({"error": str(e)}), 500
 
+# Initialize database on startup (even when run with gunicorn)
+try:
+    init_db()
+    logger.info("Database initialization completed successfully")
+except Exception as e:
+    logger.error(f"Database initialization failed: {e}")
+
 if __name__ == '__main__':
-    try:
-        init_db()
-    except Exception as e:
-        logger.error(f"Database initialization failed: {e}")
-    
     port = int(os.getenv('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
