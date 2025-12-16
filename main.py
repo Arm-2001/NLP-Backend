@@ -250,6 +250,7 @@ matcher = ProfileMatcher()
 def analyze_personality_with_ai(profile_text):
     """Use DeepSeek to analyze personality traits"""
     if not OPENROUTER_API_KEY:
+        logger.warning("OpenRouter API key not set")
         return None
     
     prompt = f"""Analyze the personality of this person based on their profile using the Big Five personality model (OCEAN).
@@ -264,7 +265,7 @@ Rate each trait from 0.0 to 1.0:
 - Neuroticism: emotional instability, anxiety, moodiness
 
 Respond ONLY in this JSON format:
-{{"openness": 0.0-1.0, "conscientiousness": 0.0-1.0, "extraversion": 0.0-1.0, "agreeableness": 0.0-1.0, "neuroticism": 0.0-1.0, "summary": "brief personality summary"}}"""
+{{"openness": 0.75, "conscientiousness": 0.65, "extraversion": 0.80, "agreeableness": 0.70, "neuroticism": 0.30, "summary": "brief personality summary"}}"""
 
     try:
         response = requests.post(
@@ -291,9 +292,31 @@ Respond ONLY in this JSON format:
             if start != -1 and end > start:
                 json_str = content[start:end]
                 personality = json.loads(json_str)
+                
+                # Validate and ensure all traits have valid values
+                default_values = {
+                    'openness': 0.5,
+                    'conscientiousness': 0.5,
+                    'extraversion': 0.5,
+                    'agreeableness': 0.5,
+                    'neuroticism': 0.5
+                }
+                
+                for trait in default_values:
+                    if trait not in personality or personality[trait] is None:
+                        logger.warning(f"Missing or null trait {trait}, using default")
+                        personality[trait] = default_values[trait]
+                    else:
+                        # Ensure values are between 0 and 1
+                        try:
+                            personality[trait] = max(0.0, min(1.0, float(personality[trait])))
+                        except (ValueError, TypeError):
+                            logger.warning(f"Invalid trait value for {trait}, using default")
+                            personality[trait] = default_values[trait]
+                
                 return personality
         
-        logger.error(f"OpenRouter error: {response.status_code}")
+        logger.error(f"OpenRouter error: {response.status_code} - {response.text}")
         return None
             
     except Exception as e:
@@ -338,20 +361,29 @@ def add_profile():
             personality = analyze_personality_with_ai(profile_text)
             
             if personality:
-                profile_data['openness'] = personality.get('openness', 0.5)
-                profile_data['conscientiousness'] = personality.get('conscientiousness', 0.5)
-                profile_data['extraversion'] = personality.get('extraversion', 0.5)
-                profile_data['agreeableness'] = personality.get('agreeableness', 0.5)
-                profile_data['neuroticism'] = personality.get('neuroticism', 0.5)
+                profile_data['openness'] = float(personality.get('openness', 0.5))
+                profile_data['conscientiousness'] = float(personality.get('conscientiousness', 0.5))
+                profile_data['extraversion'] = float(personality.get('extraversion', 0.5))
+                profile_data['agreeableness'] = float(personality.get('agreeableness', 0.5))
+                profile_data['neuroticism'] = float(personality.get('neuroticism', 0.5))
                 profile_data['personality_analyzed'] = True
                 profile_data['personality_summary'] = personality.get('summary', '')
+            else:
+                # AI analysis failed, use defaults
+                logger.warning(f"AI analysis failed for {profile_id}, using defaults")
+                profile_data['openness'] = 0.5
+                profile_data['conscientiousness'] = 0.5
+                profile_data['extraversion'] = 0.5
+                profile_data['agreeableness'] = 0.5
+                profile_data['neuroticism'] = 0.5
+                profile_data['personality_analyzed'] = False
         else:
             # Use provided personality scores or defaults
-            profile_data['openness'] = data.get('openness', 0.5)
-            profile_data['conscientiousness'] = data.get('conscientiousness', 0.5)
-            profile_data['extraversion'] = data.get('extraversion', 0.5)
-            profile_data['agreeableness'] = data.get('agreeableness', 0.5)
-            profile_data['neuroticism'] = data.get('neuroticism', 0.5)
+            profile_data['openness'] = float(data.get('openness', 0.5))
+            profile_data['conscientiousness'] = float(data.get('conscientiousness', 0.5))
+            profile_data['extraversion'] = float(data.get('extraversion', 0.5))
+            profile_data['agreeableness'] = float(data.get('agreeableness', 0.5))
+            profile_data['neuroticism'] = float(data.get('neuroticism', 0.5))
             profile_data['personality_analyzed'] = False
         
         matcher.save_profile(profile_id, profile_data)
