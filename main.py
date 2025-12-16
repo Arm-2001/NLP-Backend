@@ -331,9 +331,21 @@ def health_check():
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM profiles")
             count = cursor.fetchone()[0]
-        return jsonify({"status": "healthy", "profiles_count": count})
-    except:
-        return jsonify({"status": "unhealthy", "error": "Database connection failed"}), 500
+        
+        health_data = {
+            "status": "healthy",
+            "profiles_count": count,
+            "openrouter_configured": bool(OPENROUTER_API_KEY),
+            "database_connected": True
+        }
+        return jsonify(health_data)
+    except Exception as e:
+        logger.error(f"Health check error: {e}")
+        return jsonify({
+            "status": "unhealthy",
+            "error": str(e),
+            "database_connected": False
+        }), 500
 
 @app.route('/profile', methods=['POST'])
 def add_profile():
@@ -467,29 +479,49 @@ def analyze_personality(profile_id):
         if not profile:
             return jsonify({"error": "Profile not found"}), 404
         
+        if not OPENROUTER_API_KEY:
+            return jsonify({
+                "error": "OpenRouter API key not configured",
+                "message": "Personality analysis requires OPENROUTER_API_KEY environment variable"
+            }), 400
+        
         profile_text = matcher._create_profile_text(profile)
         personality = analyze_personality_with_ai(profile_text)
         
         if personality:
-            profile['openness'] = personality.get('openness', 0.5)
-            profile['conscientiousness'] = personality.get('conscientiousness', 0.5)
-            profile['extraversion'] = personality.get('extraversion', 0.5)
-            profile['agreeableness'] = personality.get('agreeableness', 0.5)
-            profile['neuroticism'] = personality.get('neuroticism', 0.5)
+            profile['openness'] = float(personality.get('openness', 0.5))
+            profile['conscientiousness'] = float(personality.get('conscientiousness', 0.5))
+            profile['extraversion'] = float(personality.get('extraversion', 0.5))
+            profile['agreeableness'] = float(personality.get('agreeableness', 0.5))
+            profile['neuroticism'] = float(personality.get('neuroticism', 0.5))
             profile['personality_analyzed'] = True
             
             matcher.save_profile(profile_id, profile)
             
             return jsonify({
                 "message": "Personality analyzed successfully",
-                "personality": personality
+                "personality": {
+                    "openness": profile['openness'],
+                    "conscientiousness": profile['conscientiousness'],
+                    "extraversion": profile['extraversion'],
+                    "agreeableness": profile['agreeableness'],
+                    "neuroticism": profile['neuroticism'],
+                    "summary": personality.get('summary', 'Personality analysis completed')
+                }
             }), 200
         else:
-            return jsonify({"error": "Personality analysis failed"}), 500
+            return jsonify({
+                "error": "AI analysis returned no results",
+                "message": "The AI model did not return valid personality data. This may be due to API limits or model issues.",
+                "recommendation": "Try again later or check your OPENROUTER_API_KEY"
+            }), 503
             
     except Exception as e:
         logger.error(f"Analyze personality error: {e}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({
+            "error": str(e),
+            "message": "An error occurred during personality analysis"
+        }), 500
 
 # Initialize database on startup (even when run with gunicorn)
 try:
