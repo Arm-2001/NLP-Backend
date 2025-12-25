@@ -150,6 +150,7 @@ def init_db():
                 location VARCHAR(255),
                 profession VARCHAR(255),
                 values TEXT[],
+                profile_picture TEXT,
                 openness FLOAT DEFAULT 0.5,
                 conscientiousness FLOAT DEFAULT 0.5,
                 extraversion FLOAT DEFAULT 0.5,
@@ -161,14 +162,18 @@ def init_db():
             )
         """)
         
-        # Add personality_method column if it doesn't exist (for existing tables)
+        # Add columns if they don't exist (for existing tables)
         try:
             cursor.execute("""
                 ALTER TABLE profiles 
                 ADD COLUMN IF NOT EXISTS personality_method VARCHAR(50) DEFAULT 'hybrid'
             """)
+            cursor.execute("""
+                ALTER TABLE profiles 
+                ADD COLUMN IF NOT EXISTS profile_picture TEXT
+            """)
         except Exception as e:
-            logger.warning(f"Column personality_method might already exist: {e}")
+            logger.warning(f"Columns might already exist: {e}")
         
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_profile_personality 
@@ -301,9 +306,9 @@ class ProfileMatcher:
             cursor.execute("""
                 INSERT INTO profiles (
                     profile_id, name, bio, interests, hobbies, location, 
-                    profession, values, openness, conscientiousness, 
+                    profession, values, profile_picture, openness, conscientiousness, 
                     extraversion, agreeableness, neuroticism, personality_method
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (profile_id) DO UPDATE SET
                     name = EXCLUDED.name,
                     bio = EXCLUDED.bio,
@@ -312,6 +317,7 @@ class ProfileMatcher:
                     location = EXCLUDED.location,
                     profession = EXCLUDED.profession,
                     values = EXCLUDED.values,
+                    profile_picture = EXCLUDED.profile_picture,
                     openness = EXCLUDED.openness,
                     conscientiousness = EXCLUDED.conscientiousness,
                     extraversion = EXCLUDED.extraversion,
@@ -328,6 +334,7 @@ class ProfileMatcher:
                 profile_data.get('location', ''),
                 profile_data.get('profession', ''),
                 profile_data.get('values', []),
+                profile_data.get('profile_picture', None),
                 profile_data.get('openness', 0.5),
                 profile_data.get('conscientiousness', 0.5),
                 profile_data.get('extraversion', 0.5),
@@ -384,16 +391,31 @@ class ProfileMatcher:
         """Find top K matches combining text and personality"""
         target_profile = self.get_profile(profile_id)
         if not target_profile:
+            logger.error(f"Target profile {profile_id} not found")
             return []
         
-        # Load all profiles
-        all_profiles = self.load_all_profiles()
-        
-        if len(all_profiles) <= 1:
+        # Load all profiles directly from database
+        try:
+            with get_db_connection() as conn:
+                cursor = conn.cursor(cursor_factory=RealDictCursor)
+                cursor.execute("SELECT * FROM profiles WHERE profile_id != %s", (profile_id,))
+                all_profiles_list = cursor.fetchall()
+                
+                if not all_profiles_list:
+                    logger.warning("No other profiles found in database")
+                    return []
+                
+                logger.info(f"Found {len(all_profiles_list)} profiles for matching")
+                
+                # Convert to dict
+                all_profiles = {p['profile_id']: dict(p) for p in all_profiles_list}
+                
+        except Exception as e:
+            logger.error(f"Error loading profiles: {e}")
             return []
         
         # Prepare texts for TF-IDF
-        profile_ids = [pid for pid in all_profiles.keys() if pid != profile_id]
+        profile_ids = list(all_profiles.keys())
         texts = [self._create_profile_text(all_profiles[pid]) for pid in profile_ids]
         target_text = self._create_profile_text(target_profile)
         
@@ -402,7 +424,8 @@ class ProfileMatcher:
         try:
             vectors = vectorizer.fit_transform(all_texts)
             text_similarities = cosine_similarity(vectors[0:1], vectors[1:])[0]
-        except:
+        except Exception as e:
+            logger.error(f"TF-IDF error: {e}")
             text_similarities = np.zeros(len(texts))
         
         # Calculate personality compatibility
@@ -429,7 +452,8 @@ class ProfileMatcher:
                         'name': profile.get('name'),
                         'bio': profile.get('bio'),
                         'interests': profile.get('interests'),
-                        'location': profile.get('location')
+                        'location': profile.get('location'),
+                        'profile_picture': profile.get('profile_picture')
                     }
                 })
         
@@ -479,7 +503,8 @@ def add_profile():
             'hobbies': data.get('hobbies', []),
             'location': data.get('location', ''),
             'profession': data.get('profession', ''),
-            'values': data.get('values', [])
+            'values': data.get('values', []),
+            'profile_picture': data.get('profile_picture', None)  # Base64 image
         }
         
         # Get questionnaire if provided
@@ -512,6 +537,7 @@ def add_profile():
             "message": "Profile added successfully",
             "profile_id": profile_id,
             "personality_method": profile_data['personality_method'],
+            "has_picture": profile_data['profile_picture'] is not None,
             "personality": {
                 'openness': profile_data['openness'],
                 'conscientiousness': profile_data['conscientiousness'],
@@ -554,17 +580,50 @@ def get_matches(profile_id):
         top_k = request.args.get('top_k', 10, type=int)
         min_personality = request.args.get('min_personality_score', 0.6, type=float)
         
+        # First check if profile exists
+        profile = matcher.get_profile(profile_id)
+        if not profile:
+            return jsonify({
+                "error": f"Profile '{profile_id}' not found",
+                "message": "Please check the profile ID and try again"
+            }), 404
+        
+        # Check total profiles in database
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM profiles")
+            total_count = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM profiles WHERE profile_id != %s", (profile_id,))
+            other_count = cursor.fetchone()[0]
+        
+        logger.info(f"Total profiles: {total_count}, Other profiles: {other_count}")
+        
+        if other_count == 0:
+            return jsonify({
+                "profile_id": profile_id,
+                "matches": [],
+                "count": 0,
+                "message": "No other profiles in database yet. Create more profiles to get matches!"
+            }), 200
+        
+        # Find matches
         matches = matcher.find_matches(profile_id, top_k, min_personality)
+        
+        logger.info(f"Found {len(matches)} matches for {profile_id}")
         
         return jsonify({
             "profile_id": profile_id,
             "matches": matches,
-            "count": len(matches)
+            "count": len(matches),
+            "total_profiles_searched": other_count
         }), 200
         
     except Exception as e:
         logger.error(f"Get matches error: {e}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({
+            "error": str(e),
+            "message": "An error occurred while finding matches"
+        }), 500
 
 @app.route('/profiles', methods=['GET'])
 def list_profiles():
