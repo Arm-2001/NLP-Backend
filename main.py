@@ -3,11 +3,9 @@ from flask_cors import CORS
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-import requests
 import os
 from functools import lru_cache
 import logging
-import json
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from contextlib import contextmanager
@@ -19,13 +17,103 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Configuration
-OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY', '')
 DATABASE_URL = os.getenv('DATABASE_URL', '')
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-MODEL = "tngtech/deepseek-r1t2-chimera:free"
 
 # Big Five Personality Traits dimensions
 PERSONALITY_DIMENSIONS = ['openness', 'conscientiousness', 'extraversion', 'agreeableness', 'neuroticism']
+
+# Interest to personality mapping
+INTEREST_TO_PERSONALITY = {
+    # Openness boosters
+    'art': {'openness': 0.25},
+    'painting': {'openness': 0.25},
+    'drawing': {'openness': 0.20},
+    'music': {'openness': 0.20},
+    'writing': {'openness': 0.20},
+    'poetry': {'openness': 0.25},
+    'travel': {'openness': 0.30, 'extraversion': 0.10},
+    'photography': {'openness': 0.20},
+    'movies': {'openness': 0.15},
+    'theater': {'openness': 0.20},
+    'dancing': {'openness': 0.20, 'extraversion': 0.15},
+    'philosophy': {'openness': 0.30},
+    'science': {'openness': 0.20},
+    'learning': {'openness': 0.25, 'conscientiousness': 0.10},
+    'exploring': {'openness': 0.30},
+    'adventure': {'openness': 0.30, 'extraversion': 0.10},
+    'culture': {'openness': 0.25},
+    
+    # Conscientiousness boosters
+    'planning': {'conscientiousness': 0.30},
+    'organizing': {'conscientiousness': 0.30},
+    'studying': {'conscientiousness': 0.25},
+    'working out': {'conscientiousness': 0.20},
+    'fitness': {'conscientiousness': 0.20},
+    'gym': {'conscientiousness': 0.20},
+    'running': {'conscientiousness': 0.15},
+    'coding': {'conscientiousness': 0.25, 'openness': 0.10},
+    'programming': {'conscientiousness': 0.25, 'openness': 0.10},
+    'reading': {'conscientiousness': 0.15, 'openness': 0.20},
+    'gardening': {'conscientiousness': 0.20},
+    'cooking': {'conscientiousness': 0.15},
+    'cleaning': {'conscientiousness': 0.25},
+    
+    # Extraversion boosters
+    'parties': {'extraversion': 0.35},
+    'socializing': {'extraversion': 0.35},
+    'networking': {'extraversion': 0.30},
+    'public speaking': {'extraversion': 0.35},
+    'team sports': {'extraversion': 0.25, 'agreeableness': 0.10},
+    'dancing': {'extraversion': 0.25, 'openness': 0.10},
+    'bars': {'extraversion': 0.25},
+    'clubs': {'extraversion': 0.30},
+    'concerts': {'extraversion': 0.20},
+    'festivals': {'extraversion': 0.25},
+    'meeting people': {'extraversion': 0.35},
+    'hosting': {'extraversion': 0.30, 'agreeableness': 0.10},
+    'karaoke': {'extraversion': 0.30},
+    
+    # Extraversion reducers (introverted activities)
+    'reading': {'extraversion': -0.20, 'openness': 0.20},
+    'meditation': {'extraversion': -0.15, 'neuroticism': -0.20},
+    'yoga': {'extraversion': -0.10, 'neuroticism': -0.20},
+    'gaming': {'extraversion': -0.15, 'openness': 0.10},
+    'video games': {'extraversion': -0.15},
+    'solo hiking': {'extraversion': -0.15, 'openness': 0.15},
+    'writing': {'extraversion': -0.10, 'openness': 0.20},
+    
+    # Agreeableness boosters
+    'volunteering': {'agreeableness': 0.35, 'conscientiousness': 0.15},
+    'helping others': {'agreeableness': 0.35},
+    'charity': {'agreeableness': 0.30},
+    'teaching': {'agreeableness': 0.25, 'conscientiousness': 0.10},
+    'mentoring': {'agreeableness': 0.30},
+    'animals': {'agreeableness': 0.20},
+    'pets': {'agreeableness': 0.20},
+    'community': {'agreeableness': 0.25, 'extraversion': 0.10},
+    'family': {'agreeableness': 0.25},
+    'friends': {'agreeableness': 0.20, 'extraversion': 0.15},
+    'collaboration': {'agreeableness': 0.25},
+    'teamwork': {'agreeableness': 0.25},
+    
+    # Neuroticism reducers (emotional stability)
+    'meditation': {'neuroticism': -0.30},
+    'yoga': {'neuroticism': -0.25},
+    'mindfulness': {'neuroticism': -0.30},
+    'relaxation': {'neuroticism': -0.25},
+    'nature': {'neuroticism': -0.20, 'openness': 0.15},
+    'hiking': {'neuroticism': -0.15, 'openness': 0.15},
+    'camping': {'neuroticism': -0.15, 'openness': 0.15},
+    'spa': {'neuroticism': -0.20},
+    'massage': {'neuroticism': -0.20},
+    'beach': {'neuroticism': -0.15},
+    
+    # Mixed
+    'sports': {'extraversion': 0.15, 'conscientiousness': 0.10},
+    'music': {'openness': 0.20, 'agreeableness': 0.05},
+    'cooking': {'conscientiousness': 0.15, 'agreeableness': 0.10},
+    'baking': {'conscientiousness': 0.20, 'agreeableness': 0.10},
+}
 
 vectorizer = TfidfVectorizer(max_features=500, stop_words='english')
 
@@ -65,7 +153,7 @@ def init_db():
                 extraversion FLOAT DEFAULT 0.5,
                 agreeableness FLOAT DEFAULT 0.5,
                 neuroticism FLOAT DEFAULT 0.5,
-                personality_analyzed BOOLEAN DEFAULT FALSE,
+                personality_method VARCHAR(50) DEFAULT 'hybrid',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -76,6 +164,100 @@ def init_db():
             ON profiles(openness, conscientiousness, extraversion, agreeableness, neuroticism)
         """)
         logger.info("Database initialized successfully")
+
+def analyze_personality_from_interests(interests):
+    """Analyze personality based on interests"""
+    scores = {
+        'openness': 0.5,
+        'conscientiousness': 0.5,
+        'extraversion': 0.5,
+        'agreeableness': 0.5,
+        'neuroticism': 0.5
+    }
+    
+    if not interests:
+        return scores
+    
+    # Process each interest
+    for interest in interests:
+        interest_lower = interest.lower().strip()
+        
+        # Exact match
+        if interest_lower in INTEREST_TO_PERSONALITY:
+            modifiers = INTEREST_TO_PERSONALITY[interest_lower]
+            for trait, modifier in modifiers.items():
+                scores[trait] = max(0.0, min(1.0, scores[trait] + modifier))
+        else:
+            # Partial match (if interest contains keyword)
+            for keyword, modifiers in INTEREST_TO_PERSONALITY.items():
+                if keyword in interest_lower or interest_lower in keyword:
+                    for trait, modifier in modifiers.items():
+                        # Apply half the modifier for partial matches
+                        scores[trait] = max(0.0, min(1.0, scores[trait] + (modifier * 0.5)))
+                    break
+    
+    return scores
+
+def analyze_personality_from_questionnaire(questionnaire):
+    """
+    Analyze personality from Big Five questionnaire responses
+    
+    Expected format:
+    {
+        'openness': [5, 4, 5, 4, 5],  # 1-5 ratings
+        'conscientiousness': [4, 5, 4, 4, 5],
+        'extraversion': [2, 2, 1, 2, 3],
+        'agreeableness': [4, 4, 3, 4, 5],
+        'neuroticism': [2, 3, 2, 2, 1]
+    }
+    """
+    scores = {}
+    
+    for trait, ratings in questionnaire.items():
+        if trait in PERSONALITY_DIMENSIONS and ratings:
+            # Calculate average rating
+            avg_rating = sum(ratings) / len(ratings)
+            # Normalize from 1-5 scale to 0-1 scale
+            scores[trait] = (avg_rating - 1) / 4
+        else:
+            scores[trait] = 0.5
+    
+    return scores
+
+def analyze_personality_hybrid(interests=None, questionnaire=None):
+    """
+    Combine interests and questionnaire for personality analysis
+    Questionnaire gets 70% weight (more reliable)
+    Interests get 30% weight
+    """
+    final_scores = {
+        'openness': 0.5,
+        'conscientiousness': 0.5,
+        'extraversion': 0.5,
+        'agreeableness': 0.5,
+        'neuroticism': 0.5
+    }
+    
+    weighted_scores = []
+    
+    # Interests-based (30% weight)
+    if interests:
+        interest_scores = analyze_personality_from_interests(interests)
+        weighted_scores.append((interest_scores, 0.3))
+    
+    # Questionnaire-based (70% weight)
+    if questionnaire:
+        q_scores = analyze_personality_from_questionnaire(questionnaire)
+        weighted_scores.append((q_scores, 0.7))
+    
+    # Calculate weighted average
+    if weighted_scores:
+        for trait in final_scores:
+            weighted_sum = sum(scores[trait] * weight for scores, weight in weighted_scores)
+            total_weight = sum(weight for _, weight in weighted_scores)
+            final_scores[trait] = weighted_sum / total_weight
+    
+    return final_scores
 
 class ProfileMatcher:
     def __init__(self):
@@ -109,7 +291,7 @@ class ProfileMatcher:
                 INSERT INTO profiles (
                     profile_id, name, bio, interests, hobbies, location, 
                     profession, values, openness, conscientiousness, 
-                    extraversion, agreeableness, neuroticism, personality_analyzed
+                    extraversion, agreeableness, neuroticism, personality_method
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (profile_id) DO UPDATE SET
                     name = EXCLUDED.name,
@@ -124,7 +306,7 @@ class ProfileMatcher:
                     extraversion = EXCLUDED.extraversion,
                     agreeableness = EXCLUDED.agreeableness,
                     neuroticism = EXCLUDED.neuroticism,
-                    personality_analyzed = EXCLUDED.personality_analyzed,
+                    personality_method = EXCLUDED.personality_method,
                     updated_at = CURRENT_TIMESTAMP
             """, (
                 profile_id,
@@ -140,7 +322,7 @@ class ProfileMatcher:
                 profile_data.get('extraversion', 0.5),
                 profile_data.get('agreeableness', 0.5),
                 profile_data.get('neuroticism', 0.5),
-                profile_data.get('personality_analyzed', False)
+                profile_data.get('personality_method', 'hybrid')
             ))
     
     def delete_profile(self, profile_id):
@@ -165,7 +347,7 @@ class ProfileMatcher:
         """Calculate compatibility based on Big Five personality traits"""
         score = 0
         weights = {
-            'openness': 0.2,
+            'openness': 0.20,
             'conscientiousness': 0.15,
             'extraversion': 0.25,
             'agreeableness': 0.25,
@@ -246,83 +428,6 @@ class ProfileMatcher:
 
 matcher = ProfileMatcher()
 
-@lru_cache(maxsize=50)
-def analyze_personality_with_ai(profile_text):
-    """Use DeepSeek to analyze personality traits"""
-    if not OPENROUTER_API_KEY:
-        logger.warning("OpenRouter API key not set")
-        return None
-    
-    prompt = f"""Analyze the personality of this person based on their profile using the Big Five personality model (OCEAN).
-
-Profile: {profile_text[:800]}
-
-Rate each trait from 0.0 to 1.0:
-- Openness: creativity, curiosity, open to new experiences
-- Conscientiousness: organized, responsible, goal-oriented
-- Extraversion: outgoing, energetic, social
-- Agreeableness: friendly, compassionate, cooperative
-- Neuroticism: emotional instability, anxiety, moodiness
-
-Respond ONLY in this JSON format:
-{{"openness": 0.75, "conscientiousness": 0.65, "extraversion": 0.80, "agreeableness": 0.70, "neuroticism": 0.30, "summary": "brief personality summary"}}"""
-
-    try:
-        response = requests.post(
-            OPENROUTER_URL,
-            headers={
-                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "model": MODEL,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 300
-            },
-            timeout=15
-        )
-        
-        if response.status_code == 200:
-            data = response.json()
-            content = data['choices'][0]['message']['content']
-            
-            # Extract JSON from response
-            start = content.find('{')
-            end = content.rfind('}') + 1
-            if start != -1 and end > start:
-                json_str = content[start:end]
-                personality = json.loads(json_str)
-                
-                # Validate and ensure all traits have valid values
-                default_values = {
-                    'openness': 0.5,
-                    'conscientiousness': 0.5,
-                    'extraversion': 0.5,
-                    'agreeableness': 0.5,
-                    'neuroticism': 0.5
-                }
-                
-                for trait in default_values:
-                    if trait not in personality or personality[trait] is None:
-                        logger.warning(f"Missing or null trait {trait}, using default")
-                        personality[trait] = default_values[trait]
-                    else:
-                        # Ensure values are between 0 and 1
-                        try:
-                            personality[trait] = max(0.0, min(1.0, float(personality[trait])))
-                        except (ValueError, TypeError):
-                            logger.warning(f"Invalid trait value for {trait}, using default")
-                            personality[trait] = default_values[trait]
-                
-                return personality
-        
-        logger.error(f"OpenRouter error: {response.status_code} - {response.text}")
-        return None
-            
-    except Exception as e:
-        logger.error(f"AI personality analysis error: {e}")
-        return None
-
 @app.route('/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
@@ -332,13 +437,12 @@ def health_check():
             cursor.execute("SELECT COUNT(*) FROM profiles")
             count = cursor.fetchone()[0]
         
-        health_data = {
+        return jsonify({
             "status": "healthy",
             "profiles_count": count,
-            "openrouter_configured": bool(OPENROUTER_API_KEY),
+            "personality_method": "hybrid (interests + questionnaire)",
             "database_connected": True
-        }
-        return jsonify(health_data)
+        })
     except Exception as e:
         logger.error(f"Health check error: {e}")
         return jsonify({
@@ -367,49 +471,42 @@ def add_profile():
             'values': data.get('values', [])
         }
         
-        # Analyze personality if not provided
-        if data.get('analyze_personality', True) and OPENROUTER_API_KEY:
-            profile_text = matcher._create_profile_text(profile_data)
-            personality = analyze_personality_with_ai(profile_text)
-            
-            if personality:
-                profile_data['openness'] = float(personality.get('openness', 0.5))
-                profile_data['conscientiousness'] = float(personality.get('conscientiousness', 0.5))
-                profile_data['extraversion'] = float(personality.get('extraversion', 0.5))
-                profile_data['agreeableness'] = float(personality.get('agreeableness', 0.5))
-                profile_data['neuroticism'] = float(personality.get('neuroticism', 0.5))
-                profile_data['personality_analyzed'] = True
-                profile_data['personality_summary'] = personality.get('summary', '')
-            else:
-                # AI analysis failed, use defaults
-                logger.warning(f"AI analysis failed for {profile_id}, using defaults")
-                profile_data['openness'] = 0.5
-                profile_data['conscientiousness'] = 0.5
-                profile_data['extraversion'] = 0.5
-                profile_data['agreeableness'] = 0.5
-                profile_data['neuroticism'] = 0.5
-                profile_data['personality_analyzed'] = False
+        # Get questionnaire if provided
+        questionnaire = data.get('questionnaire', None)
+        
+        # Analyze personality using hybrid method
+        personality_scores = analyze_personality_hybrid(
+            interests=profile_data['interests'],
+            questionnaire=questionnaire
+        )
+        
+        # Add personality scores to profile
+        profile_data['openness'] = float(personality_scores['openness'])
+        profile_data['conscientiousness'] = float(personality_scores['conscientiousness'])
+        profile_data['extraversion'] = float(personality_scores['extraversion'])
+        profile_data['agreeableness'] = float(personality_scores['agreeableness'])
+        profile_data['neuroticism'] = float(personality_scores['neuroticism'])
+        
+        # Set method used
+        if questionnaire and profile_data['interests']:
+            profile_data['personality_method'] = 'hybrid'
+        elif questionnaire:
+            profile_data['personality_method'] = 'questionnaire'
         else:
-            # Use provided personality scores or defaults
-            profile_data['openness'] = float(data.get('openness', 0.5))
-            profile_data['conscientiousness'] = float(data.get('conscientiousness', 0.5))
-            profile_data['extraversion'] = float(data.get('extraversion', 0.5))
-            profile_data['agreeableness'] = float(data.get('agreeableness', 0.5))
-            profile_data['neuroticism'] = float(data.get('neuroticism', 0.5))
-            profile_data['personality_analyzed'] = False
+            profile_data['personality_method'] = 'interests'
         
         matcher.save_profile(profile_id, profile_data)
         
         return jsonify({
             "message": "Profile added successfully",
             "profile_id": profile_id,
-            "personality_analyzed": profile_data.get('personality_analyzed', False),
+            "personality_method": profile_data['personality_method'],
             "personality": {
-                'openness': profile_data.get('openness'),
-                'conscientiousness': profile_data.get('conscientiousness'),
-                'extraversion': profile_data.get('extraversion'),
-                'agreeableness': profile_data.get('agreeableness'),
-                'neuroticism': profile_data.get('neuroticism')
+                'openness': profile_data['openness'],
+                'conscientiousness': profile_data['conscientiousness'],
+                'extraversion': profile_data['extraversion'],
+                'agreeableness': profile_data['agreeableness'],
+                'neuroticism': profile_data['neuroticism']
             }
         }), 201
         
@@ -471,59 +568,33 @@ def list_profiles():
         logger.error(f"List profiles error: {e}")
         return jsonify({"error": str(e)}), 500
 
-@app.route('/analyze-personality/<profile_id>', methods=['POST'])
-def analyze_personality(profile_id):
-    """Re-analyze personality for an existing profile"""
+@app.route('/analyze-personality', methods=['POST'])
+def analyze_personality_endpoint():
+    """Analyze personality from interests and/or questionnaire"""
     try:
-        profile = matcher.get_profile(profile_id)
-        if not profile:
-            return jsonify({"error": "Profile not found"}), 404
+        data = request.json
+        interests = data.get('interests', [])
+        questionnaire = data.get('questionnaire', None)
         
-        if not OPENROUTER_API_KEY:
+        if not interests and not questionnaire:
             return jsonify({
-                "error": "OpenRouter API key not configured",
-                "message": "Personality analysis requires OPENROUTER_API_KEY environment variable"
+                "error": "Either interests or questionnaire required"
             }), 400
         
-        profile_text = matcher._create_profile_text(profile)
-        personality = analyze_personality_with_ai(profile_text)
+        personality = analyze_personality_hybrid(interests, questionnaire)
         
-        if personality:
-            profile['openness'] = float(personality.get('openness', 0.5))
-            profile['conscientiousness'] = float(personality.get('conscientiousness', 0.5))
-            profile['extraversion'] = float(personality.get('extraversion', 0.5))
-            profile['agreeableness'] = float(personality.get('agreeableness', 0.5))
-            profile['neuroticism'] = float(personality.get('neuroticism', 0.5))
-            profile['personality_analyzed'] = True
-            
-            matcher.save_profile(profile_id, profile)
-            
-            return jsonify({
-                "message": "Personality analyzed successfully",
-                "personality": {
-                    "openness": profile['openness'],
-                    "conscientiousness": profile['conscientiousness'],
-                    "extraversion": profile['extraversion'],
-                    "agreeableness": profile['agreeableness'],
-                    "neuroticism": profile['neuroticism'],
-                    "summary": personality.get('summary', 'Personality analysis completed')
-                }
-            }), 200
-        else:
-            return jsonify({
-                "error": "AI analysis returned no results",
-                "message": "The AI model did not return valid personality data. This may be due to API limits or model issues.",
-                "recommendation": "Try again later or check your OPENROUTER_API_KEY"
-            }), 503
-            
+        method = 'hybrid' if (interests and questionnaire) else ('questionnaire' if questionnaire else 'interests')
+        
+        return jsonify({
+            "personality": personality,
+            "method": method
+        }), 200
+        
     except Exception as e:
         logger.error(f"Analyze personality error: {e}")
-        return jsonify({
-            "error": str(e),
-            "message": "An error occurred during personality analysis"
-        }), 500
+        return jsonify({"error": str(e)}), 500
 
-# Initialize database on startup (even when run with gunicorn)
+# Initialize database on startup
 try:
     init_db()
     logger.info("Database initialization completed successfully")
