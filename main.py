@@ -138,6 +138,8 @@ def init_db():
     """Initialize database tables"""
     with get_db_connection() as conn:
         cursor = conn.cursor()
+        
+        # Create table if not exists
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS profiles (
                 profile_id VARCHAR(255) PRIMARY KEY,
@@ -158,6 +160,15 @@ def init_db():
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        
+        # Add personality_method column if it doesn't exist (for existing tables)
+        try:
+            cursor.execute("""
+                ALTER TABLE profiles 
+                ADD COLUMN IF NOT EXISTS personality_method VARCHAR(50) DEFAULT 'hybrid'
+            """)
+        except Exception as e:
+            logger.warning(f"Column personality_method might already exist: {e}")
         
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_profile_personality 
